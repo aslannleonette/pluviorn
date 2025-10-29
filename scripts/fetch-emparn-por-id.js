@@ -1,16 +1,14 @@
 /**
  * scripts/fetch-emparn-por-id.js
- * Coleta o boletim diário da EMPARN pelo ID sequencial (ex.: 10965 em 2025-10-29).
- * - Calcula o ID do dia no fuso America/Fortaleza (UTC-3)
- * - Tenta baixar https://meteorologia.emparn.rn.gov.br/boletim/diario/<ID>
- * - Se falhar, tenta via proxy https://r.jina.ai/http://...
- * - Faz fallback em [id, id-1, id+1]
- * - Extrai as 4 abas (Agreste, Central, Leste, Oeste) e salva:
- *     data/latest.json  (com { id, dados })
- *     data/latest.csv
+ * Coleta o boletim diário da EMPARN pelo ID sequencial.
+ * - Base: 29/10/2025 => ID 10965
+ * - Calcula ID do dia em America/Fortaleza, tenta [id, id-1, id+1]
+ * - Tenta acesso direto (HTTPS)
+ * - Fallback: r.jina.ai com /https:// e /http://
+ * - Extrai as 4 abas e salva data/latest.json e data/latest.csv
  *
- * Execução: node scripts/fetch-emparn-por-id.js
- * Requisitos: Node 20+, cheerio, papaparse (npm i cheerio papaparse)
+ * Requisitos: Node 20+, cheerio, papaparse
+ *   npm i cheerio papaparse
  */
 
 const fs = require("fs");
@@ -18,12 +16,23 @@ const cheerio = require("cheerio");
 const Papa = require("papaparse");
 
 // ---------- Config ----------
-const TZ = "America/Fortaleza"; // UTC-3
-const BASE_DATE = "2025-10-29";  // referência: 29/10/2025
-const BASE_ID = 10965;           // ID correspondente à BASE_DATE
-const UA = "pluviorn-bot/1.0 (+github actions)";
-// Permite forçar uma data via env, útil para testes: DD/MM/AAAA ou AAAA-MM-DD
+const TZ = "America/Fortaleza";
+const BASE_DATE = "2025-10-29"; // 29/10/2025
+const BASE_ID = 10965;
 const FORCED_DATE = process.env.FORCED_DATE || null;
+
+const ORIGIN = "https://meteorologia.emparn.rn.gov.br";
+const UA_BROWSER =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
+const COMMON_HEADERS = {
+  "User-Agent": UA_BROWSER,
+  "Accept":
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
+  Referer: ORIGIN + "/",
+};
 
 // ---------- Utils ----------
 function ensureDir(p) {
@@ -49,10 +58,8 @@ function formatDateLocal(dateLike) {
 }
 
 function idDoDia(dateLike = undefined) {
-  // Data-alvo no fuso de Fortaleza, truncada para meia-noite local
   let alvo;
   if (FORCED_DATE) {
-    // aceita DD/MM/AAAA ou AAAA-MM-DD
     if (/\d{2}\/\d{2}\/\d{4}/.test(FORCED_DATE)) {
       const [dd, mm, yyyy] = FORCED_DATE.split("/").map(Number);
       alvo = new Date(Date.UTC(yyyy, mm - 1, dd));
@@ -67,33 +74,37 @@ function idDoDia(dateLike = undefined) {
     const [dd, mm, yyyy] = formatDateLocal(now).split("/").map(Number);
     alvo = new Date(Date.UTC(yyyy, mm - 1, dd));
   }
-
   const [bY, bM, bD] = BASE_DATE.split("-").map(Number);
   const baseMid = new Date(Date.UTC(bY, bM - 1, bD));
   const dias = Math.round((alvo - baseMid) / (1000 * 60 * 60 * 24));
   return BASE_ID + dias;
 }
 
+// ---------- Fetchers ----------
 async function fetchHtmlDireto(id) {
-  const url = `https://meteorologia.emparn.rn.gov.br/boletim/diario/${id}`;
+  const url = `${ORIGIN}/boletim/diario/${id}`;
   const res = await fetch(url, {
-    headers: { "User-Agent": UA, "Accept": "text/html,*/*" },
+    headers: COMMON_HEADERS,
     redirect: "follow",
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status} em ${url}`);
+  if (!res.ok) throw new Error(`Direto ${res.status} em ${url}`);
   return res.text();
 }
 
 async function fetchHtmlProxy(id) {
-  const proxy = `https://r.jina.ai/http://meteorologia.emparn.rn.gov.br/boletim/diario/${id}`;
-  const res = await fetch(proxy, {
-    headers: { "User-Agent": UA, "Accept": "text/html,*/*" },
-    redirect: "follow",
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} no proxy para id ${id}`);
-  return res.text();
+  // Tenta primeiro a forma HTTPS -> HTTPS
+  const pHttps = `https://r.jina.ai/https://meteorologia.emparn.rn.gov.br/boletim/diario/${id}`;
+  const r1 = await fetch(pHttps, { headers: COMMON_HEADERS, redirect: "follow" });
+  if (r1.ok) return r1.text();
+  // Se não deu, tenta HTTPS -> HTTP (alguns sites funcionam assim no proxy)
+  const pHttp = `https://r.jina.ai/http://meteorologia.emparn.rn.gov.br/boletim/diario/${id}`;
+  const r2 = await fetch(pHttp, { headers: COMMON_HEADERS, redirect: "follow" });
+  if (r2.ok) return r2.text();
+
+  throw new Error(`Proxy falhou (https=${r1.status}, http=${r2.status}) para id ${id}`);
 }
 
+// ---------- Parsing ----------
 function parseTabela($, containerSel, regiao) {
   const out = [];
   const $table = $(`${containerSel} table`);
@@ -105,7 +116,6 @@ function parseTabela($, containerSel, regiao) {
       .toArray()
       .map((td) => $(td).text().replace(/\s+/g, " ").trim());
     if (!tds.length) return;
-
     const [municipio, posto, tipo_posto, horas, prec] = tds;
     out.push({
       regiao,
@@ -116,7 +126,6 @@ function parseTabela($, containerSel, regiao) {
       precipitacao_mm: parseNumberBR(prec),
     });
   });
-
   return out;
 }
 
@@ -128,7 +137,6 @@ function extrairAbasDoHTML(html) {
     { id: "leste_potiguar", nome: "Leste Potiguar" },
     { id: "oeste_potiguar", nome: "Oeste Potiguar" },
   ];
-
   let dados = [];
   for (const t of tabs) {
     const sel = `#${t.id}-content`;
@@ -143,7 +151,7 @@ function extrairAbasDoHTML(html) {
   ensureDir("data");
 
   const idHoje = idDoDia();
-  const candidatos = [idHoje, idHoje - 1, idHoje + 1]; // protege contra publicação adiantada/atrasada
+  const candidatos = [idHoje, idHoje - 1, idHoje + 1];
 
   console.log(`Fuso: ${TZ}`);
   console.log(`Data (local): ${formatDateLocal()}`);
@@ -162,7 +170,7 @@ function extrairAbasDoHTML(html) {
         html = await fetchHtmlProxy(id);
       }
 
-      // guarda HTML para depuração (sobrescreve a cada tentativa bem-sucedida)
+      // Salva HTML para debug
       saveText("data/rendered.html", html);
 
       const dados = extrairAbasDoHTML(html);
