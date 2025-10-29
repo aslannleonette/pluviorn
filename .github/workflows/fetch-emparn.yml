@@ -1,0 +1,58 @@
+name: Fetch EMPARN Twice Daily (pluviorn)
+
+on:
+  schedule:
+    - cron: '15 12 * * *'   # 09:15 BRT
+    - cron: '15 21 * * *'   # 18:15 BRT
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm init -y
+          npm i playwright papaparse
+          npx playwright install --with-deps chromium
+
+      - name: Run scraper
+        run: node scripts/fetch-emparn.js
+
+      - name: Timestamp snapshot
+        run: |
+          mkdir -p data
+          TS=$(date +'%Y-%m-%d_%H%M')
+          for ext in csv json; do
+            if [ -f "data/latest.$ext" ]; then
+              cp "data/latest.$ext" "data/${TS}.$ext"
+            fi
+          done
+
+      - name: Commit & Push
+        run: |
+          git config user.name "pluviorn-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add data/
+          git commit -m "Atualização automática EMPARN 🌧️" || echo "Sem alterações"
+          git push || true
+
+      - name: Upload HTML para debug (se falhar)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emparn-html
+          path: data/rendered.html
+          if-no-files-found: ignore
