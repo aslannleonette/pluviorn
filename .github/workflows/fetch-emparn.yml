@@ -1,13 +1,21 @@
-name: Fetch EMPARN Twice Daily (pluviorn)
+name: Fetch EMPARN Twice Daily (pluviorn - por ID)
 
 on:
   schedule:
-    - cron: '15 12 * * *'   # 09:15 BRT
-    - cron: '15 21 * * *'   # 18:15 BRT
-  workflow_dispatch:
+    # Horários em UTC (equivalem a 09:15 e 18:15 em America/Fortaleza)
+    - cron: '15 12 * * *'
+    - cron: '15 21 * * *'
+  workflow_dispatch: {}   # permite executar manualmente
 
 permissions:
   contents: write
+
+concurrency:
+  group: pluviorn-fetch
+  cancel-in-progress: true
+
+env:
+  TZ: America/Fortaleza
 
 jobs:
   fetch:
@@ -22,37 +30,44 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Install dependencies
+      - name: Install deps (cheerio + papaparse)
         run: |
           npm init -y
-          npm i playwright papaparse
-          npx playwright install --with-deps chromium
+          npm i cheerio papaparse
 
-      - name: Run scraper
-        run: node scripts/fetch-emparn.js
+      # Opcional: force uma data para teste (DD/MM/AAAA ou AAAA-MM-DD)
+      # - name: Coletar por ID de data forçada (teste)
+      #   env:
+      #     FORCED_DATE: '2025-10-29'
+      #   run: node scripts/fetch-emparn-por-id.js
 
-      - name: Timestamp snapshot
+      - name: Coletar por ID do dia (BRT)
+        run: node scripts/fetch-emparn-por-id.js
+
+      - name: Timestamp snapshot (UTC-3) + keep latest.*
         run: |
           mkdir -p data
           TS=$(date +'%Y-%m-%d_%H%M')
           for ext in csv json; do
-            if [ -f "data/latest.$ext" ]; then
+            if [ -s "data/latest.$ext" ]; then
               cp "data/latest.$ext" "data/${TS}.$ext"
             fi
           done
+          echo "---- data/ ----"
+          ls -lh data | sed -n '1,200p' || true
 
       - name: Commit & Push
         run: |
           git config user.name "pluviorn-bot"
           git config user.email "actions@users.noreply.github.com"
           git add data/
-          git commit -m "Atualização automática EMPARN 🌧️" || echo "Sem alterações"
+          git commit -m "Atualização automática EMPARN (por ID)" || echo "Sem alterações"
           git push || true
 
-      - name: Upload HTML para debug (se falhar)
-        if: failure()
+      - name: Upload HTML (debug)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: emparn-html
+          name: emparn-rendered-html
           path: data/rendered.html
           if-no-files-found: ignore
