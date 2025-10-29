@@ -1,50 +1,39 @@
-name: Fetch EMPARN Twice Daily (pluviorn - por ID)
+name: Fetch INMET (UF única)
 
 on:
   schedule:
-    # Horários em UTC (equivalem a 09:15 e 18:15 em America/Fortaleza)
-    - cron: '15 12 * * *'
-    - cron: '15 21 * * *'
-  workflow_dispatch: {}   # permite executar manualmente
+    - cron: '25 12 * * *'   # 09:25 BRT
+    - cron: '25 21 * * *'   # 18:25 BRT
+  workflow_dispatch: {}
 
 permissions:
   contents: write
 
 concurrency:
-  group: pluviorn-fetch
+  group: pluviorn-inmet
   cancel-in-progress: true
 
 env:
   TZ: America/Fortaleza
+  UF: RN        # troque se quiser outra UF (ex.: CE, PB, PE)
+  DIAS: 3       # janela de dias para garantir cobertura (recomendado 3)
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install deps (cheerio + papaparse)
-        run: |
-          npm init -y
-          npm i cheerio papaparse
+      - name: Coletar INMET (horário, últimas ${{ env.DIAS }} datas)
+        run: node scripts/fetch-inmet.js
 
-      # Opcional: force uma data para teste (DD/MM/AAAA ou AAAA-MM-DD)
-      # - name: Coletar por ID de data forçada (teste)
-      #   env:
-      #     FORCED_DATE: '2025-10-29'
-      #   run: node scripts/fetch-emparn-por-id.js
-
-      - name: Coletar por ID do dia (BRT)
-        run: node scripts/fetch-emparn-por-id.js
-
-      - name: Timestamp snapshot (UTC-3) + keep latest.*
+      - name: Snapshot com timestamp (UTC-3)
         run: |
           mkdir -p data
           TS=$(date +'%Y-%m-%d_%H%M')
@@ -53,7 +42,6 @@ jobs:
               cp "data/latest.$ext" "data/${TS}.$ext"
             fi
           done
-          echo "---- data/ ----"
           ls -lh data | sed -n '1,200p' || true
 
       - name: Commit & Push
@@ -61,13 +49,15 @@ jobs:
           git config user.name "pluviorn-bot"
           git config user.email "actions@users.noreply.github.com"
           git add data/
-          git commit -m "Atualização automática EMPARN (por ID)" || echo "Sem alterações"
+          git commit -m "INMET (${UF}) atualização automática" || echo "Sem alterações"
           git push || true
 
-      - name: Upload HTML (debug)
+      - name: Upload debug
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: emparn-rendered-html
-          path: data/rendered.html
-          if-no-files-found: ignore
+          name: inmet-datasets
+          path: |
+            data/inmet.json
+            data/latest.json
+            data/latest.csv
